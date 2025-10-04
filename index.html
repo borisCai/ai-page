@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>手势画板（摄像头控制）</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            background: #f5f5f5; 
+            padding: 20px; 
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+        }
+        .status-bar {
+            padding: 10px 20px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            width: 800px;
+            text-align: center;
+            display: none;
+        }
+        .success { background: #dff0d8; color: #3c763d; }
+        .error { background: #f2dede; color: #a94442; }
+        .info { background: #d9edf7; color: #31708f; }
+        
+        .camera-select { 
+            margin-bottom: 15px; 
+            padding: 10px; 
+            background: white; 
+            border-radius: 8px; 
+            width: 800px;
+            text-align: center;
+        }
+        .container { 
+            position: relative; 
+            margin-top: 10px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        #video { 
+            position: absolute; 
+            width: 800px; 
+            height: 600px; 
+            object-fit: cover; 
+            border-radius: 8px; 
+            opacity: 0.3; 
+        }
+        #canvas { 
+            position: relative; 
+            border: 2px solid #333; 
+            border-radius: 8px; 
+            background: #fff; 
+        }
+        .controls { 
+            margin-top: 15px; 
+            display: flex; 
+            gap: 10px; 
+            align-items: center; 
+            flex-wrap: wrap; 
+            justify-content: center; 
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            width: 800px;
+        }
+        button, select, input { 
+            padding: 8px 15px; 
+            border: 1px solid #ddd; 
+            border-radius: 4px; 
+            cursor: pointer; 
+        }
+        #color { width: 50px; height: 30px; padding: 2px; }
+        #brushSize { width: 100px; }
+        .troubleshoot {
+            margin-top: 15px;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+            width: 800px;
+            display: none;
+        }
+        .troubleshoot h4 {
+            margin-bottom: 10px;
+            color: #a94442;
+        }
+        .troubleshoot ul {
+            margin-left: 20px;
+        }
+        .troubleshoot li {
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="status-bar info" id="status">正在检测摄像头...</div>
+    
+    <div class="camera-select" id="cameraSelectContainer">
+        <label>选择摄像头：</label>
+        <select id="cameraSelect"></select>
+        <button id="refreshCameras">刷新列表</button>
+    </div>
+
+    <div class="container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas" width="800" height="600"></canvas>
+    </div>
+
+    <div class="controls">
+        <button id="clear">清除画布</button>
+        <input type="color" id="color" value="#000000">
+        <label>画笔粗细：</label>
+        <input type="range" id="brushSize" min="1" max="20" value="5">
+    </div>
+
+    <div class="troubleshoot" id="troubleshoot">
+        <h4>摄像头连接问题排查</h4>
+        <ul>
+            <li>确保摄像头已正确连接到电脑USB接口</li>
+            <li>检查摄像头是否被其他应用占用（关闭可能使用摄像头的程序）</li>
+            <li>确认浏览器已获得摄像头权限（地址栏左侧可查看权限设置）</li>
+            <li>尝试刷新页面或重新插拔摄像头</li>
+            <li>检查摄像头驱动是否正常（在设备管理器中查看）</li>
+        </ul>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const clearBtn = document.getElementById('clear');
+        const colorPicker = document.getElementById('color');
+        const brushSize = document.getElementById('brushSize');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const cameraSelectContainer = document.getElementById('cameraSelectContainer');
+        const refreshBtn = document.getElementById('refreshCameras');
+        const statusBar = document.getElementById('status');
+        const troubleshoot = document.getElementById('troubleshoot');
+
+        let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+        let currentStream = null;
+        let hands; // 延迟初始化，等待摄像头就绪
+
+        // 显示状态消息
+        function showStatus(message, type = 'info') {
+            statusBar.textContent = message;
+            statusBar.className = `status-bar ${type}`;
+            statusBar.style.display = 'block';
+        }
+
+        // 隐藏状态消息
+        function hideStatus() {
+            statusBar.style.display = 'none';
+        }
+
+        // 列出所有可用摄像头
+        async function listCameras() {
+            try {
+                showStatus('正在检测可用摄像头...');
+                troubleshoot.style.display = 'none';
+                cameraSelectContainer.style.display = 'block';
+
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                
+                cameraSelect.innerHTML = '';
+
+                if (videoDevices.length === 0) {
+                    // 没有检测到任何摄像头
+                    showStatus('未检测到可用摄像头', 'error');
+                    troubleshoot.style.display = 'block';
+                    cameraSelectContainer.style.display = 'none';
+                    return false;
+                }
+
+                // 填充摄像头选项
+                videoDevices.forEach(device => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `摄像头 ${cameraSelect.options.length + 1}`;
+                    cameraSelect.appendChild(option);
+                });
+
+                showStatus(`已检测到 ${videoDevices.length} 个摄像头`, 'success');
+                return true;
+            } catch (err) {
+                console.error('摄像头检测错误:', err);
+                showStatus(`摄像头检测失败: ${err.message}`, 'error');
+                troubleshoot.style.display = 'block';
+                return false;
+            }
+        }
+
+        // 启动指定的摄像头
+        async function startCamera(deviceId) {
+            try {
+                // 关闭当前流
+                if (currentStream) {
+                    currentStream.getTracks().forEach(track => track.stop());
+                }
+
+                showStatus('正在启动摄像头...');
+
+                const constraints = {
+                    video: {
+                        deviceId: deviceId ? { exact: deviceId } : undefined,
+                        width: { ideal: 800 },
+                        height: { ideal: 600 },
+                        facingMode: 'user'
+                    }
+                };
+
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                currentStream = stream;
+
+                // 初始化手部追踪（确保只初始化一次）
+                if (!hands) {
+                    initHandTracking();
+                }
+
+                showStatus('摄像头已就绪，可开始画图', 'success');
+                setTimeout(hideStatus, 3000); // 3秒后自动隐藏成功消息
+                return true;
+            } catch (err) {
+                console.error('启动摄像头错误:', err);
+                let errorMsg = '启动摄像头失败: ';
+                
+                // 更具体的错误提示
+                if (err.name === 'NotAllowedError') {
+                    errorMsg += '请授予摄像头权限（可在地址栏左侧设置）';
+                } else if (err.name === 'NotFoundError') {
+                    errorMsg += '未找到指定的摄像头';
+                } else if (err.name === 'NotReadableError') {
+                    errorMsg += '摄像头被占用或无法访问';
+                } else {
+                    errorMsg += err.message;
+                }
+
+                showStatus(errorMsg, 'error');
+                troubleshoot.style.display = 'block';
+                return false;
+            }
+        }
+
+        // 初始化手部追踪
+        function initHandTracking() {
+            hands = new Hands({
+                locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
+            });
+            
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            // 手部追踪回调
+            hands.onResults(results => {
+                ctx.save();
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                if (results.multiHandLandmarks) {
+                    for (const handLm of results.multiHandLandmarks) {
+                        const indexTip = handLm[8];
+                        const x = indexTip.x * canvas.width;
+                        const y = indexTip.y * canvas.height;
+
+                        const middleMcp = handLm[9];
+                        if (indexTip.y > middleMcp.y) {
+                            if (!isDrawing) {
+                                isDrawing = true;
+                                lastX = x;
+                                lastY = y;
+                            } else {
+                                ctx.beginPath();
+                                ctx.moveTo(lastX, lastY);
+                                ctx.lineTo(x, y);
+                                ctx.strokeStyle = colorPicker.value;
+                                ctx.lineWidth = brushSize.value;
+                                ctx.lineCap = 'round';
+                                ctx.stroke();
+                                lastX = x;
+                                lastY = y;
+                            }
+                        } else {
+                            isDrawing = false;
+                        }
+                    }
+                }
+                ctx.restore();
+            });
+
+            // 启动帧处理
+            const drawFrame = () => {
+                if (video.readyState >= 2) { // 确保视频已准备好
+                    hands.send({ image: video });
+                }
+                requestAnimationFrame(drawFrame);
+            };
+            video.addEventListener('play', drawFrame);
+        }
+
+        // 事件监听
+        clearBtn.addEventListener('click', () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        });
+
+        cameraSelect.addEventListener('change', () => {
+            startCamera(cameraSelect.value);
+        });
+
+        refreshBtn.addEventListener('click', async () => {
+            const hasCameras = await listCameras();
+            if (hasCameras) {
+                startCamera(cameraSelect.value);
+            }
+        });
+
+        // 页面加载时初始化
+        window.addEventListener('load', async () => {
+            const hasCameras = await listCameras();
+            if (hasCameras) {
+                startCamera(cameraSelect.value);
+            }
+        });
+
+        // 监听浏览器权限变化
+        if ('permissions' in navigator) {
+            navigator.permissions.query({ name: 'camera' }).then(permissionStatus => {
+                permissionStatus.onchange = () => {
+                    listCameras(); // 权限变化时重新检测摄像头
+                };
+            });
+        }
+    </script>
+</body>
+</html>
